@@ -6,8 +6,8 @@ from linebot.models import MessageEvent, LocationMessage, TextMessage, TextSendM
 app = FastAPI()
 
 # ⚠️ 請確保這裡有填入你的憑證
-LINE_CHANNEL_ACCESS_TOKEN = "jwRW6/DD9UT16ZwnsC6GXeozxQcn3ndN3/3svfuX7WINNV6GoWlPEdlN3Jqhlr4TBDlB+Vcctx5TO6PXvk+wNHdwnhlzSrkz9EI/RINdNJ+ISXaA59HuNE1jiVyNzeIyuUPm1H+fcsLw/QjmRFChXgdB04t89/1O/w1cDnyilFU="
-LINE_CHANNEL_SECRET = "f6743732d7cc1e9cd7a4fea722392301"
+LINE_CHANNEL_ACCESS_TOKEN = "YOUR_TOKEN"
+LINE_CHANNEL_SECRET = "YOUR_CHANNEL_SECRET"
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
