@@ -4,7 +4,7 @@ A vibe coding final project for the course Computer Programming II.
 This project uses **Go** and **C++** as main programming languages. 
 
 ### How to Build and Run
-#### I. Build the Go server
+#### Step I. Build the Go server
 
 > You can directly run the **makefile** to compile Go and C++ file. 
 
@@ -15,20 +15,20 @@ go mod tidy;
 go build -o tsiah-png;
 ```
 
-#### II. Build the C++ engine
+#### Step II. Build the C++ engine
 The C++ engine source is located in `cpp/engine.cpp`. Compile it into an executable named `engine`:
 ```sh
 g++ -O2 cpp/engine.cpp -o engine
 ``` 
 
-#### III. Set the Environment Variables
+#### Step III. Set the Environment Variables
 Set the LINE credentials before running the Go server:
 ```sh
 export LINE_CHANNEL_ACCESS_TOKEN=your_token
 export LINE_CHANNEL_SECRET=your_secret
 ```
 
-#### IV. Run the bot
+#### Step IV. Run the bot
 ```sh
 ./tsiah-png
 ```
