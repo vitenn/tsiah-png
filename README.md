@@ -1,4 +1,4 @@
-# LINE Bot Project: Mealomino  
+# LINE Bot Project: 飽聲大帝（暫）
 
 A vibe coding final project for the course Computer Programming II.  
 
