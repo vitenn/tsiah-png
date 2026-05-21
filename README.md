@@ -24,7 +24,7 @@ g++ -O2 cpp/engine.cpp -o engine
 #### Step III. Set the Environment Variables
 Set the LINE credentials before running the Go server:
 ```sh
-export LINE_CHANNEL_ACCESS_TOKEN=your_token
+export LINE_CHANNEL_ACCESS_TOKEN=your_token;
 export LINE_CHANNEL_SECRET=your_secret
 ```
 
