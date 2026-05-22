@@ -1,2 +1,2 @@
-github.com/line/line-bot-sdk-go/v8 v8.20.0 h1:Jv22DV3JuQ5qZvniqUbg504bJrVzffXs2CMpyoiuIZU=
-github.com/line/line-bot-sdk-go/v8 v8.20.0/go.mod h1:QMXJwPka2ysSeVQKWXkBp8DzBFs+CFAXFNo75KJtWho=
+github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
+github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
