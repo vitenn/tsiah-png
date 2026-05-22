@@ -22,10 +22,12 @@ g++ -O2 cpp/engine.cpp -o engine
 ``` 
 
 #### Step III. Set the Environment Variables
-Set the LINE credentials before running the Go server:
+Set the **LINE** credentials before running the Go server.  
+As this project also uses **Google Maps API** to fetch restaurant data, you also need to set the Google Maps API key as an environment variable.
 ```sh
-export LINE_CHANNEL_ACCESS_TOKEN=your_token;
-export LINE_CHANNEL_SECRET=your_secret
+export LINE_CHANNEL_ACCESS_TOKEN="your_token";
+export LINE_CHANNEL_SECRET="your_secret";
+export GOOGLE_MAPS_API_KEY="your_google_maps_api_key";
 ```
 
 #### Step IV. Run the bot
