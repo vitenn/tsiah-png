@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -28,12 +33,13 @@ var sessions sync.Map // map[userID]([]Restaurant)
 func main() {
 	token := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
 	secret := os.Getenv("LINE_CHANNEL_SECRET")
+
 	if token == "" || secret == "" {
 		log.Fatal("LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET must be set")
 	}
 
 	var err error
-	bot, err = linebot.New(token, secret)
+	bot, err = linebot.New(secret, token)
 	if err != nil {
 		log.Fatalf("linebot.New: %v", err)
 	}
@@ -41,7 +47,7 @@ func main() {
 	http.HandleFunc("/webhook", webhookHandler)
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "5050"
+		port = "8080"
 	}
 	addr := ":" + port
 	log.Printf("Listening on %s", addr)
@@ -49,15 +55,52 @@ func main() {
 }
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[====== Webhook 觸發了！ =====] 收到來自：%s 的請求", r.RemoteAddr)
+
+	// 暫時性偵錯：記錄簽章與 request body 摘要，然後恢復 body 給 ParseRequest 使用
+	sig := r.Header.Get("X-Line-Signature")
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("read body error: %v", err)
+	} else {
+		bstr := string(bodyBytes)
+		if len(bstr) > 1000 {
+			bstr = bstr[:1000] + "...(truncated)"
+		}
+		log.Printf("X-Line-Signature=%s, body=%s", sig, bstr)
+		if os.Getenv("DEBUG_DUMP_BODY") == "1" {
+			if writeErr := os.WriteFile("body.json", bodyBytes, 0644); writeErr != nil {
+				log.Printf("write body.json error: %v", writeErr)
+			} else {
+				log.Printf("wrote debug body to body.json")
+			}
+			if writeErr := os.WriteFile("body.sig", []byte(sig), 0644); writeErr != nil {
+				log.Printf("write body.sig error: %v", writeErr)
+			}
+			secret := os.Getenv("LINE_CHANNEL_SECRET")
+			if secret != "" {
+				h := hmac.New(sha256.New, []byte(secret))
+				h.Write(bodyBytes)
+				expected := base64.StdEncoding.EncodeToString(h.Sum(nil))
+				log.Printf("expected signature=%s", expected)
+			}
+		}
+	}
+	// restore body for ParseRequest
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
 	events, err := bot.ParseRequest(r)
 	if err != nil {
 		if err == linebot.ErrInvalidSignature {
+			log.Printf("ParseRequest error: %v, signature=%s", err, sig)
 			http.Error(w, "Invalid signature", http.StatusBadRequest)
 			return
 		}
+		log.Printf("ParseRequest error: %v", err)
 		http.Error(w, "Parse error", http.StatusInternalServerError)
 		return
 	}
+	log.Printf("ParseRequest succeeded, events=%d", len(events))
 
 	ctx := r.Context()
 	for _, ev := range events {
