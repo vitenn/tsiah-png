@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,7 +32,8 @@ type Restaurant struct {
 }
 
 var bot *linebot.Client
-var sessions sync.Map // map[userID]([]Restaurant)
+var sessions sync.Map   // map[userID]([]Restaurant)
+var userStates sync.Map // map[userID]string，用來記錄使用者的上下文狀態
 
 // 💡 定義 C++ 核心與 Go 共享的純文字資料庫路徑
 const dbPath = "restaurants.txt"
@@ -159,12 +161,64 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 		}
 	}
 
+	// 檢查狀態
+	state, ok := userStates.Load(userID)
+	isBuaPue := ok && state.(string) == "waiting_for_bua_pue_loc"
+
+	// 收到位置後，不管當初是什麼狀態，都清空它，避免卡住
+	userStates.Delete(userID)
+
 	if len(nearby) == 0 {
-		_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("找不到 2 公里內的餐廳")).Do()
+		if isBuaPue {
+			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("笑桮！這附近方圓兩公里內找不到餐廳！點擊「加入餐廳」告訴吾！")).Do()
+		} else {
+			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("找不到 2 公里內的餐廳")).Do()
+		}
 		return
 	}
 
 	sessions.Store(userID, nearby)
+
+	if isBuaPue {
+		// 隨機盲抽附近的一家
+		randomIndex := rand.Intn(len(nearby))
+		chosen := nearby[randomIndex]
+
+		replyMsg := fmt.Sprintf("聖桮！\n今晚就去吃【%s】！\n距離你 %.0f 公尺，走路大約 %d 分鐘就到了！", chosen.Name, chosen.DistanceM, chosen.Minutes)
+
+		// 順便附上地圖導航按鈕給他
+		bubble := &linebot.BubbleContainer{
+			Type: linebot.FlexContainerTypeBubble,
+			Body: &linebot.BoxComponent{
+				Type:   linebot.FlexComponentTypeBox,
+				Layout: linebot.FlexBoxLayoutTypeVertical,
+				Contents: []linebot.FlexComponent{
+					&linebot.TextComponent{
+						Type:   linebot.FlexComponentTypeText,
+						Text:   replyMsg,
+						Wrap:   true,
+						Weight: linebot.FlexTextWeightTypeBold,
+					},
+				},
+			},
+			Footer: &linebot.BoxComponent{
+				Type:   linebot.FlexComponentTypeBox,
+				Layout: linebot.FlexBoxLayoutTypeVertical,
+				Contents: []linebot.FlexComponent{
+					&linebot.ButtonComponent{
+						Type:   linebot.FlexComponentTypeButton,
+						Style:  linebot.FlexButtonStyleTypePrimary,
+						Color:  "#00b900",
+						Action: linebot.NewURIAction("開啟 Google Maps", fmt.Sprintf("https://www.google.com/maps/dir/?api=1&destination=%f,%f", chosen.Lat, chosen.Lng)),
+					},
+				},
+			},
+		}
+
+		flexMsg := linebot.NewFlexMessage("大帝賜食", bubble)
+		_, _ = bot.ReplyMessage(replyToken, flexMsg).Do()
+		return
+	}
 
 	var b strings.Builder
 	for i, r := range nearby {
@@ -174,6 +228,56 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 }
 
 func handleText(ctx context.Context, replyToken, userID, text string) {
+	// 防呆機制：如果使用者點了其他功能，就清空可能卡住的「跋桮」狀態
+	if text == "加入餐廳" || text == "食肆雷達" || strings.Contains(text, "maps.app") {
+		userStates.Delete(userID)
+	}
+
+	if text == "加入餐廳" {
+		reply := linebot.NewTextMessage("請直接貼上 Google Maps 的餐廳網址！")
+		reply.WithQuickReplies(linebot.NewQuickReplyItems(
+			linebot.NewQuickReplyButton(
+				"",
+				&linebot.PostbackAction{
+					Label:       "點我開啟鍵盤",
+					Data:        "action=open_keyboard",
+					InputOption: linebot.InputOptionOpenKeyboard,
+				},
+			),
+		))
+		_, _ = bot.ReplyMessage(replyToken, reply).Do()
+		return
+	}
+
+	if text == "食肆雷達" {
+		// 確保這時候如果傳送位置，是走正常的食肆雷達流程
+		userStates.Store(userID, "waiting_for_radar_loc")
+
+		reply := linebot.NewTextMessage("大帝的法眼已準備好！請傳送你現在的位置，讓大帝為你掃描周遭的隱藏美食！")
+		reply.WithQuickReplies(linebot.NewQuickReplyItems(
+			linebot.NewQuickReplyButton(
+				"",
+				linebot.NewLocationAction("點擊傳送我的位置"),
+			),
+		))
+		_, _ = bot.ReplyMessage(replyToken, reply).Do()
+		return
+	}
+
+	if text == "跋桮" {
+		userStates.Store(userID, "waiting_for_bua_pue_loc")
+
+		reply := linebot.NewTextMessage("請傳送你現在的位置，大帝將為你施法搜尋方圓內的命定餐廳！")
+		reply.WithQuickReplies(linebot.NewQuickReplyItems(
+			linebot.NewQuickReplyButton(
+				"",
+				linebot.NewLocationAction("點擊傳送我的位置"),
+			),
+		))
+		_, _ = bot.ReplyMessage(replyToken, reply).Do()
+		return
+	}
+
 	if strings.Contains(text, "maps.app.goo.gl") || strings.Contains(text, "goo.gl/maps") || strings.Contains(text, "google.com/maps") || strings.Contains(text, "google.com/maps/place") {
 		// 提取出文字中的網址
 		targetURL := extractURL(text)
@@ -186,7 +290,7 @@ func handleText(ctx context.Context, replyToken, userID, text string) {
 		name, lat, lng, err := parseGoogleMaps(targetURL)
 		if err != nil {
 			log.Printf("解析 Google Maps 失敗: %v", err)
-			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("抱歉，這間餐廳的經緯度太神祕了，我解析失敗...")).Do()
+			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("抱歉，這間餐廳的資訊太神祕了，我解析失敗...")).Do()
 			return
 		}
 
@@ -194,7 +298,7 @@ func handleText(ctx context.Context, replyToken, userID, text string) {
 		err = saveToDatabase(name, lat, lng)
 		if err != nil {
 			log.Printf("寫入資料庫失敗: %v", err)
-			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("解析成功，但存入美食小金庫時發生硬碟錯誤...")).Do()
+			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("解析成功，但存入美食小金庫時發生錯誤...")).Do()
 			return
 		}
 
