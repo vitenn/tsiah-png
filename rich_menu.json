@@ -1,0 +1,27 @@
+{
+    "size": {
+      "width": 2500,
+      "height": 1686
+    },
+    "selected": true,
+    "name": "BaoShengDaDi Menu V4",
+    "chatBarText": "選單",
+    "areas": [
+      {
+        "bounds": { "x": 0, "y": 0, "width": 1250, "height": 1686 },
+        "action": { "type": "message", "text": "食肆雷達" }
+      },
+      {
+        "bounds": { "x": 1250, "y": 0, "width": 1250, "height": 843 },
+        "action": { "type": "message", "text": "跋桮" }
+      },
+      {
+        "bounds": { "x": 1250, "y": 843, "width": 625, "height": 843 },
+        "action": { "type": "message", "text": "加入餐廳" }
+      },
+      {
+        "bounds": { "x": 1875, "y": 843, "width": 625, "height": 843 },
+        "action": { "type": "postback", "data": "action=show_collection" }
+      }
+    ]
+}
