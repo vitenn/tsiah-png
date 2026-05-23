@@ -1,0 +1,16 @@
+# 忽略 Go 編譯出來的執行檔（依據你的 makefile 名稱）
+tsiah-png
+
+# 忽略 C++ 編譯出來的執行檔
+engine
+engine.exe
+
+# 忽略含有 LINE Token 等敏感資訊的環境變數檔案
+token.env
+.env
+
+# 忽略 Mac 系統自動生成的檔案（如果你是用 Mac 開發）
+.DS_Store
+
+# 忽略 VS Code 的快取與個人設定資料夾（選填）
+.vscode/
