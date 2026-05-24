@@ -29,8 +29,9 @@ export LINE_CHANNEL_ACCESS_TOKEN="your_token";
 export LINE_CHANNEL_SECRET="your_secret";
 export GOOGLE_MAPS_API_KEY="your_google_maps_api_key";
 ```
-
 #### Step IV. Run the bot
+> If you have edited `rich_menu.json` or `rich_menu.png` , please run this command `./push_rich_menu` at first to ensure the rich menu up to date.
+
 ```sh
 ./tsiah-png
 ```
