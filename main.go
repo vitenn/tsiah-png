@@ -24,11 +24,15 @@ import (
 )
 
 type Restaurant struct {
-	Name      string
-	DistanceM float64
-	Minutes   int
-	Lat       float64
-	Lng       float64
+	Name        string
+	DistanceM   float64
+	Minutes     int
+	Lat         float64
+	Lng         float64
+	
+	GoogleURL   string
+	Rating      float64
+	PhotoURL    string
 }
 
 var bot *linebot.Client
@@ -128,6 +132,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot.LocationMessage) {
+	// 🌟 1. 執行 C++ 核心程式，計算附近餐廳
 	latStr := fmt.Sprintf("%f", msg.Latitude)
 	lngStr := fmt.Sprintf("%f", msg.Longitude)
 	cmd := exec.CommandContext(ctx, "./engine", latStr, lngStr)
@@ -141,6 +146,7 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 		return
 	}
 
+	// 🌟 2. 解析 C++ 回傳的餐廳資料
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	var nearby []Restaurant
 	for _, line := range lines {
@@ -151,13 +157,74 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 		if len(parts) < 5 {
 			continue
 		}
+		// 原本解析 C++ parts[0] 到 parts[4] 的部分保留
 		name := parts[0]
 		distM, _ := strconv.ParseFloat(parts[1], 64)
 		minsF, _ := strconv.ParseFloat(parts[2], 64)
 		latF, _ := strconv.ParseFloat(parts[3], 64)
 		lngF, _ := strconv.ParseFloat(parts[4], 64)
-		if distM <= 2000 {
-			nearby = append(nearby, Restaurant{Name: name, DistanceM: distM, Minutes: int(minsF + 0.5), Lat: latF, Lng: lngF})
+
+		if distM <= 2000 { // 僅處理 2 公里內的餐廳
+			// 組合 C++ 的距離資料
+			res := Restaurant{Name: name, DistanceM: distM, Minutes: int(minsF + 0.5), Lat: latF, Lng: lngF}
+			nearby = append(nearby, res)
+		}
+	}
+
+	// 🌟 3. 讀取本機擴充資料庫，建立快速查詢 Map
+	dbBytes, _ := os.ReadFile(dbPath) // 讀取本機資料庫檔案
+	dbLines := strings.Split(string(dbBytes), "\n")
+	extraInfoMap := make(map[string]Restaurant)
+
+	for _, l := range dbLines {
+		parts := strings.Split(strings.TrimSpace(l), "|")
+		// 新格式只需 8 個欄位：名稱|0|0|緯度|經度|Google網址|評分|圖片網址
+		if len(parts) >= 8 {
+			r, _ := strconv.ParseFloat(parts[6], 64) // 解析評分
+			extraInfoMap[parts[0]] = Restaurant{
+				GoogleURL: parts[5],
+				Rating:    r,
+				PhotoURL:  parts[7],
+			}
+		}
+	}
+
+	// 🌟 4. 合併 C++ 資料與擴充資料庫
+	for i := range nearby {
+		if ext, exists := extraInfoMap[nearby[i].Name]; exists {
+			// 如果擴充資料庫中有對應的餐廳，補充資料
+			nearby[i].GoogleURL = ext.GoogleURL
+			nearby[i].Rating = ext.Rating
+			nearby[i].PhotoURL = ext.PhotoURL
+		} else {
+			// 預設防呆圖片
+			nearby[i].PhotoURL = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500"
+		}
+	}
+
+	// 🌟 5. 組合 Flex Carousel 傳送 (取代原本的純文字回覆)
+	var bubbles []*linebot.BubbleContainer
+	for i, r := range nearby {
+		if i >= 10 {
+			break // LINE Carousel 一次最多只能發送 10 張卡片
+		}
+		bubbles = append(bubbles, createRestaurantBubble(r))
+	}
+
+	if len(bubbles) > 0 {
+		// 建立 Flex Carousel
+		carousel := &linebot.CarouselContainer{
+			Type:     linebot.FlexContainerTypeCarousel,
+			Contents: bubbles,
+		}
+		flexMsg := linebot.NewFlexMessage("吾為汝挑選的食肆名單", carousel)
+
+		// 發送 Flex Message
+		_, err := bot.ReplyMessage(replyToken, flexMsg).Do()
+		if err != nil {
+			log.Printf("發送 Flex Message 失敗: %v", err)
+		} else {
+			log.Println("✨ [食肆雷達] 成功發送精美 Flex Carousel！")
 		}
 	}
 
@@ -287,7 +354,7 @@ func handleText(ctx context.Context, replyToken, userID, text string) {
 		}
 
 		// 呼叫核心解析函式
-		name, lat, lng, err := parseGoogleMaps(targetURL)
+		restaurant, err := parseGoogleMaps(targetURL)
 		if err != nil {
 			log.Printf("解析 Google Maps 失敗: %v", err)
 			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("抱歉，這間餐廳的資訊太神祕了，我解析失敗...")).Do()
@@ -295,14 +362,14 @@ func handleText(ctx context.Context, replyToken, userID, text string) {
 		}
 
 		// 2. 🗄️ 這裡呼叫你們的資料庫寫入邏輯
-		err = saveToDatabase(name, lat, lng)
+		err = saveToDatabase(restaurant)
 		if err != nil {
 			log.Printf("寫入資料庫失敗: %v", err)
 			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("解析成功，但存入美食小金庫時發生錯誤...")).Do()
 			return
 		}
 
-		replyMsg := fmt.Sprintf("🎉 成功捕獲情勒新目標！\n名稱：%s\n經緯度：(%f, %f)\n已完美匯入美食底蘊資料庫！", name, lat, lng)
+		replyMsg := fmt.Sprintf("🎉 成功捕獲情勒新目標！\n名稱：%s\n經緯度：(%f, %f)\n已完美匯入美食底蘊資料庫！", restaurant.Name, restaurant.Lat, restaurant.Lng)
 		_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage(replyMsg)).Do()
 		return
 	}
@@ -339,29 +406,20 @@ func extractURL(text string) string {
 	return ""
 }
 
-func parseGoogleMaps(mapURL string) (name string, lat, lng float64, err error) {
+func parseGoogleMaps(mapURL string) (Restaurant, error) {
 	apiKey := os.Getenv("GOOGLE_MAPS_API_KEY")
 	if apiKey == "" {
-		return "", 0, 0, errors.New("需要 GOOGLE_MAPS_API_KEY")
+		return Restaurant{}, errors.New("需要 GOOGLE_MAPS_API_KEY")
 	}
 
-	// 🛠️ 步驟 1：先用 http.Client 追蹤重導向，把短網址還原成真實長網址
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return nil // 允許跟隨 302 導向
-		},
-	}
-
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return nil }}
 	resp, err := client.Get(mapURL)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("還原短網址失敗: %v", err)
+		return Restaurant{}, fmt.Errorf("還原短網址失敗: %v", err)
 	}
 	defer resp.Body.Close()
 
 	finalURL := resp.Request.URL.String()
-	log.Printf("🔗 短網址已成功還原為長網址: %s", finalURL)
-
-	// 🛠️ 步驟 2：從長網址中抽離出搜尋關鍵字 (包含可能很髒的店名或地址)
 	searchQuery := ""
 	u, parseErr := url.Parse(finalURL)
 	if parseErr == nil {
@@ -369,8 +427,6 @@ func parseGoogleMaps(mapURL string) (name string, lat, lng float64, err error) {
 			searchQuery = q
 		}
 	}
-
-	// 防禦機制：如果從 query 沒撈到，試著從 /maps/place/ 路徑撈
 	if searchQuery == "" && strings.Contains(finalURL, "/maps/place/") {
 		parts := strings.Split(finalURL, "/maps/place/")
 		if len(parts) > 1 {
@@ -382,26 +438,21 @@ func parseGoogleMaps(mapURL string) (name string, lat, lng float64, err error) {
 			}
 		}
 	}
-
-	// 如果真的不幸什麼字串都撈不到，最後的死馬當活馬醫：直接把整串長網址餵給 Google 搜尋
 	if searchQuery == "" {
 		searchQuery = finalURL
 	}
 
-	log.Printf("📡 正在將還原後的關鍵字 [%s] 交付 Google Places API 進行精準洗滌...", searchQuery)
-
-	// 🛠️ 步驟 3：呼叫 Google Places API (New) 換取最乾淨的店名與座標
 	googleAPIURL := "https://places.googleapis.com/v1/places:searchText"
 	jsonPayload := fmt.Sprintf(`{"textQuery": "%s", "languageCode": "zh-TW"}`, searchQuery)
-
 	req, _ := http.NewRequest("POST", googleAPIURL, bytes.NewBuffer([]byte(jsonPayload)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Goog-Api-Key", apiKey)
-	req.Header.Set("X-Goog-FieldMask", "places.displayName,places.location")
+	// 🌟 擴充 FieldMask，抓取更多資料
+	req.Header.Set("X-Goog-FieldMask", "places.displayName,places.location,places.rating,places.googleMapsUri,places.photos")
 
 	apiResp, err := client.Do(req)
 	if err != nil {
-		return "", 0, 0, fmt.Errorf("Google Places API 連線失敗: %v", err)
+		return Restaurant{}, fmt.Errorf("Google Places API 連線失敗: %v", err)
 	}
 	defer apiResp.Body.Close()
 
@@ -414,37 +465,144 @@ func parseGoogleMaps(mapURL string) (name string, lat, lng float64, err error) {
 			DisplayName struct {
 				Text string `json:"text"`
 			} `json:"displayName"`
+			Rating        float64 `json:"rating"`
+			GoogleMapsUri string  `json:"googleMapsUri"`
+			Photos        []struct {
+				Name string `json:"name"`
+			} `json:"photos"`
 		} `json:"places"`
 	}
 
 	var gResp GooglePlacesResponse
 	if err := json.NewDecoder(apiResp.Body).Decode(&gResp); err != nil {
-		return "", 0, 0, fmt.Errorf("解析 Google JSON 失敗: %v", err)
+		return Restaurant{}, fmt.Errorf("解析 Google JSON 失敗: %v", err)
 	}
 
 	if len(gResp.Places) > 0 {
-		targetPlace := gResp.Places[0]
-		name = targetPlace.DisplayName.Text // ✨ 這裡拿到的絕對是100%最乾淨、無地址贅字的店名
-		lat = targetPlace.Location.Latitude
-		lng = targetPlace.Location.Longitude
-		log.Printf("🎉 混合架構整合成功！店名: [%s], 座標: (%f, %f)", name, lat, lng)
-		return name, lat, lng, nil
-	}
+		p := gResp.Places[0]
+		res := Restaurant{
+			Name:      p.DisplayName.Text,
+			Lat:       p.Location.Latitude,
+			Lng:       p.Location.Longitude,
+			GoogleURL: p.GoogleMapsUri,
+			Rating:    p.Rating,
+		}
+		
+		// 組合照片 URL (如果有照片)
+		if len(p.Photos) > 0 {
+			res.PhotoURL = fmt.Sprintf("https://places.googleapis.com/v1/%s/media?key=%s&maxHeightPx=400&maxWidthPx=400", p.Photos[0].Name, apiKey)
+		} else {
+			res.PhotoURL = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500" // 預設圖片
+		}
 
-	return "", 0, 0, errors.New("Google 官方 API 無法從此地圖關鍵字識別任何地點")
+		return res, nil
+	}
+	return Restaurant{}, errors.New("Google 官方 API 無法識別")
 }
 
-func saveToDatabase(name string, lat, lng float64) error {
-	// 以 O_APPEND (附加) 模式開啟檔案，若檔案不存在則自動 O_CREATE 建立
+// 寫入檔案時，將新欄位用 `|` 串接在後面，C++ 引擎讀取前 5 個欄位不會受影響
+func saveToDatabase(res Restaurant) error {
 	f, err := os.OpenFile(dbPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
-	// 依照你們 C++ 核心對齊的格式寫入：名稱|0|0|緯度|經度
-	// 這裡的 0 和 0 是預留給 C++ 計算距離和時間的欄位
-	record := fmt.Sprintf("%s|0|0|%f|%f\n", name, lat, lng)
+	// 格式：名稱|0|0|緯度|經度|Google網址|評分|圖片網址
+	record := fmt.Sprintf("%s|0|0|%f|%f|%s|%.1f|%s\n", res.Name, res.Lat, res.Lng, res.GoogleURL, res.Rating, res.PhotoURL)
 	_, err = f.WriteString(record)
 	return err
+}
+
+func createRestaurantBubble(res Restaurant) *linebot.BubbleContainer {
+	// 1. 動態生成 5 顆星星
+	var stars []linebot.FlexComponent
+	ratingInt := int(res.Rating + 0.5) // 四捨五入
+	for i := 1; i <= 5; i++ {
+		iconURL := "https://developers-resource.landpress.line.me/fx/img/review_gold_star_28.png"
+		if i > ratingInt {
+			iconURL = "https://developers-resource.landpress.line.me/fx/img/review_gray_star_28.png"
+		}
+		stars = append(stars, &linebot.IconComponent{
+			Type: linebot.FlexComponentTypeIcon,
+			Size: linebot.FlexIconSizeTypeSm,
+			URL:  iconURL,
+		})
+	}
+	// 加上分數文字
+	stars = append(stars, &linebot.TextComponent{
+		Type:   linebot.FlexComponentTypeText,
+		Text:   fmt.Sprintf("%.1f", res.Rating),
+		Size:   linebot.FlexTextSizeTypeSm,
+		Color:  "#999999",
+		Margin: linebot.FlexComponentMarginTypeMd,
+		Flex:   linebot.IntPtr(0),
+	})
+
+	// 2. 避免空網址導致點擊崩潰
+	actionURI := res.GoogleURL
+	if actionURI == "" {
+		actionURI = "https://maps.google.com"
+	}
+
+	// 3. 建立並回傳完整 Bubble
+	return &linebot.BubbleContainer{
+		Type: linebot.FlexContainerTypeBubble,
+		Hero: &linebot.ImageComponent{
+			Type:        linebot.FlexComponentTypeImage,
+			URL:         res.PhotoURL,
+			Size:        linebot.FlexImageSizeTypeFull,
+			AspectRatio: linebot.FlexImageAspectRatioType20to13,
+			AspectMode:  linebot.FlexImageAspectModeTypeCover,
+			Action:      linebot.NewURIAction("view image", actionURI),
+		},
+		Body: &linebot.BoxComponent{
+			Type:   linebot.FlexComponentTypeBox,
+			Layout: linebot.FlexBoxLayoutTypeVertical,
+			Contents: []linebot.FlexComponent{
+				&linebot.TextComponent{
+					Type:   linebot.FlexComponentTypeText,
+					Text:   res.Name,
+					Weight: linebot.FlexTextWeightTypeBold,
+					Size:   linebot.FlexTextSizeTypeXl,
+				},
+				&linebot.BoxComponent{
+					Type:     linebot.FlexComponentTypeBox,
+					Layout:   linebot.FlexBoxLayoutTypeBaseline,
+					Margin:   linebot.FlexComponentMarginTypeMd,
+					Contents: stars, // 塞入剛剛生成的星星陣列
+				},
+				&linebot.BoxComponent{
+					Type:    linebot.FlexComponentTypeBox,
+					Layout:  linebot.FlexBoxLayoutTypeVertical,
+					Margin:  linebot.FlexComponentMarginTypeLg,
+					Spacing: linebot.FlexComponentSpacingTypeSm,
+					Contents: []linebot.FlexComponent{
+						&linebot.BoxComponent{
+							Type:    linebot.FlexComponentTypeBox,
+							Layout:  linebot.FlexBoxLayoutTypeBaseline,
+							Spacing: linebot.FlexComponentSpacingTypeSm,
+							Contents: []linebot.FlexComponent{
+								&linebot.TextComponent{Type: linebot.FlexComponentTypeText, Text: "距離", Color: "#aaaaaa", Size: linebot.FlexTextSizeTypeSm, Flex: linebot.IntPtr(2)},
+								&linebot.TextComponent{Type: linebot.FlexComponentTypeText, Text: fmt.Sprintf("%.0f m (約 %d 分鐘)", res.DistanceM, res.Minutes), Wrap: true, Color: "#666666", Size: linebot.FlexTextSizeTypeSm, Flex: linebot.IntPtr(5)},
+							},
+						},
+					},
+				},
+			},
+		},
+		Footer: &linebot.BoxComponent{
+			Type:    linebot.FlexComponentTypeBox,
+			Layout:  linebot.FlexBoxLayoutTypeVertical,
+			Spacing: linebot.FlexComponentSpacingTypeSm,
+			Contents: []linebot.FlexComponent{
+				&linebot.ButtonComponent{
+					Type:   linebot.FlexComponentTypeButton,
+					Style:  linebot.FlexButtonStyleTypeLink,
+					Height: linebot.FlexButtonHeightTypeSm,
+					Action: linebot.NewURIAction("WEBSITE", actionURI),
+				},
+			},
+			Flex: linebot.IntPtr(0),
+		},
+	}
 }
