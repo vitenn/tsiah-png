@@ -5,23 +5,27 @@
     },
     "selected": true,
     "name": "BaoShengDaDi Menu V4",
-    "chatBarText": "選單",
+    "chatBarText": "飽喜充滿",
     "areas": [
       {
-        "bounds": { "x": 0, "y": 0, "width": 1250, "height": 1686 },
+        "bounds": { "x": 0, "y": 0, "width": 1538, "height": 987 },
         "action": { "type": "message", "text": "食肆雷達" }
       },
       {
-        "bounds": { "x": 1250, "y": 0, "width": 1250, "height": 843 },
+        "bounds": { "x": 1538, "y": 0, "width": 962, "height": 987 },
         "action": { "type": "message", "text": "跋桮" }
       },
       {
-        "bounds": { "x": 1250, "y": 843, "width": 625, "height": 843 },
+        "bounds": { "x": 0, "y": 987, "width": 710, "height": 699 },
         "action": { "type": "message", "text": "加入餐廳" }
       },
       {
-        "bounds": { "x": 1875, "y": 843, "width": 625, "height": 843 },
+        "bounds": { "x": 710, "y": 987, "width": 1077, "height": 699 },
         "action": { "type": "message", "text": "我的收藏" }
+      },
+      {
+        "bounds": { "x": 1787, "y": 987, "width": 713, "height": 699 },
+        "action": { "type": "message", "text": "通知設定" }
       }
     ]
 }

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/line/line-bot-sdk-go/v8/linebot"
 )
@@ -43,6 +44,14 @@ var dynamicBaseURL string // 自動記錄目前的 ngrok 網址
 // 💡 定義 C++ 核心與 Go 共享的純文字資料庫路徑
 const dbPath = "restaurants.txt"
 
+var dineMutex sync.Mutex
+
+const dineCountsFile = "dine_counts.json"
+
+var notifyMutex sync.Mutex
+
+const notifyPrefsFile = "notify_prefs.json"
+
 func main() {
 	token := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
 	secret := os.Getenv("LINE_CHANNEL_SECRET")
@@ -59,13 +68,58 @@ func main() {
 
 	http.HandleFunc("/webhook", webhookHandler)
 	http.HandleFunc("/my-collection", collectionWebHandler)
+	http.HandleFunc("/go-to-maps", goToMapsHandler)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
+
+	go startMealReminder()
+
 	addr := ":" + port
 	log.Printf("Listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
+}
+
+func startMealReminder() {
+	// 使用台灣時區
+	location := time.FixedZone("CST", 8*3600)
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for t := range ticker.C {
+		now := t.In(location)
+		currentHM := now.Format("15:04")
+
+		var mealType, mealName string
+		switch currentHM {
+		case "08:00":
+			mealType, mealName = "breakfast", "早餐"
+		case "13:00":
+			mealType, mealName = "lunch", "午餐"
+		case "19:30":
+			mealType, mealName = "dinner", "晚餐"
+		default:
+			continue
+		}
+
+		notifyMutex.Lock()
+		prefs := make(map[string]map[string]bool)
+		if fileBytes, err := os.ReadFile(notifyPrefsFile); err == nil {
+			json.Unmarshal(fileBytes, &prefs)
+		}
+		notifyMutex.Unlock()
+
+		for userID, userPrefs := range prefs {
+			// 如果有設定且該餐期為 true，才發送
+			if isEnabled, ok := userPrefs[mealType]; ok && isEnabled {
+				msg := fmt.Sprintf("大帝溫馨提醒：該吃%s啦！點擊「食肆雷達」或「跋桮」讓大帝為你指點迷津！", mealName)
+				if _, err := bot.PushMessage(userID, linebot.NewTextMessage(msg)).Do(); err != nil {
+					log.Printf("Meal reminder push failed for %s: %v", userID, err)
+				}
+			}
+		}
+	}
 }
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +271,7 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 		if i >= 10 {
 			break // LINE Carousel 一次最多只能發送 10 張卡片
 		}
-		bubbles = append(bubbles, createRestaurantBubble(r))
+		bubbles = append(bubbles, createRestaurantBubble(userID, r))
 	}
 
 	if len(bubbles) > 0 {
@@ -262,6 +316,13 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 
 		replyMsg := fmt.Sprintf("聖桮！\n今晚就去吃【%s】！\n距離你 %.0f 公尺，走路大約 %d 分鐘就到了！", chosen.Name, chosen.DistanceM, chosen.Minutes)
 
+		baseURL := getBaseURL()
+		actionURI := fmt.Sprintf("https://www.google.com/maps/dir/?api=1&destination=%f,%f", chosen.Lat, chosen.Lng)
+		finalURI := actionURI
+		if baseURL != "" {
+			finalURI = fmt.Sprintf("%s/go-to-maps?userId=%s&resName=%s&target=%s", baseURL, userID, url.QueryEscape(chosen.Name), url.QueryEscape(actionURI))
+		}
+
 		// 順便附上地圖導航按鈕給他
 		bubble := &linebot.BubbleContainer{
 			Type: linebot.FlexContainerTypeBubble,
@@ -285,7 +346,7 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 						Type:   linebot.FlexComponentTypeButton,
 						Style:  linebot.FlexButtonStyleTypePrimary,
 						Color:  "#00b900",
-						Action: linebot.NewURIAction("開啟 Google Maps", fmt.Sprintf("https://www.google.com/maps/dir/?api=1&destination=%f,%f", chosen.Lat, chosen.Lng)),
+						Action: linebot.NewURIAction("從 Google Maps 打開", finalURI),
 					},
 				},
 			},
@@ -305,8 +366,94 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 
 func handleText(ctx context.Context, replyToken, userID, text string) {
 	// 防呆機制：如果使用者點了其他功能，就清空可能卡住的「跋桮」狀態
-	if text == "加入餐廳" || text == "食肆雷達" || text == "我的收藏" || strings.Contains(text, "maps.app") {
+	if text == "加入餐廳" || text == "食肆雷達" || text == "我的收藏" || text == "通知設定" || strings.Contains(text, "maps.app") {
 		userStates.Delete(userID)
+	}
+
+	if text == "通知設定" {
+		notifyMutex.Lock()
+		prefs := make(map[string]map[string]bool)
+		if fileBytes, err := os.ReadFile(notifyPrefsFile); err == nil {
+			json.Unmarshal(fileBytes, &prefs)
+		}
+		notifyMutex.Unlock()
+
+		userPrefs := prefs[userID]
+		if userPrefs == nil {
+			userPrefs = make(map[string]bool)
+		}
+
+		// Helper func to gen button text
+		getBtnText := func(mealType, mealName string) string {
+			if isEnabled, ok := userPrefs[mealType]; ok && isEnabled {
+				return "關閉" + mealName + "提醒"
+			}
+			return "開啟" + mealName + "提醒"
+		}
+		// Helper func to gen button style/color
+		getBtnStyle := func(mealType string) (linebot.FlexButtonStyleType, string) {
+			if isEnabled, ok := userPrefs[mealType]; ok && isEnabled {
+				return linebot.FlexButtonStyleTypeSecondary, "#e0e0e0"
+			}
+			return linebot.FlexButtonStyleTypePrimary, "#00b900"
+		}
+
+		bStyle, bColor := getBtnStyle("breakfast")
+		lStyle, lColor := getBtnStyle("lunch")
+		dStyle, dColor := getBtnStyle("dinner")
+
+		bubble := &linebot.BubbleContainer{
+			Type: linebot.FlexContainerTypeBubble,
+			Body: &linebot.BoxComponent{
+				Type:   linebot.FlexComponentTypeBox,
+				Layout: linebot.FlexBoxLayoutTypeVertical,
+				Contents: []linebot.FlexComponent{
+					&linebot.TextComponent{
+						Type:   linebot.FlexComponentTypeText,
+						Text:   "大帝的食飯提醒設定",
+						Weight: linebot.FlexTextWeightTypeBold,
+						Size:   linebot.FlexTextSizeTypeLg,
+					},
+					&linebot.TextComponent{
+						Type:   linebot.FlexComponentTypeText,
+						Text:   "開啟後，大帝將於早(08:00)、午(13:00)、晚(19:30)為你送上溫暖的提醒。",
+						Wrap:   true,
+						Size:   linebot.FlexTextSizeTypeSm,
+						Color:  "#666666",
+						Margin: linebot.FlexComponentMarginTypeMd,
+					},
+				},
+			},
+			Footer: &linebot.BoxComponent{
+				Type:    linebot.FlexComponentTypeBox,
+				Layout:  linebot.FlexBoxLayoutTypeVertical,
+				Spacing: linebot.FlexComponentSpacingTypeSm,
+				Contents: []linebot.FlexComponent{
+					&linebot.ButtonComponent{
+						Type:   linebot.FlexComponentTypeButton,
+						Style:  bStyle,
+						Color:  bColor,
+						Action: &linebot.PostbackAction{Label: getBtnText("breakfast", "早餐"), Data: "action=toggle_notify&meal=breakfast"},
+					},
+					&linebot.ButtonComponent{
+						Type:   linebot.FlexComponentTypeButton,
+						Style:  lStyle,
+						Color:  lColor,
+						Action: &linebot.PostbackAction{Label: getBtnText("lunch", "午餐"), Data: "action=toggle_notify&meal=lunch"},
+					},
+					&linebot.ButtonComponent{
+						Type:   linebot.FlexComponentTypeButton,
+						Style:  dStyle,
+						Color:  dColor,
+						Action: &linebot.PostbackAction{Label: getBtnText("dinner", "晚餐"), Data: "action=toggle_notify&meal=dinner"},
+					},
+				},
+			},
+		}
+
+		flexMsg := linebot.NewFlexMessage("通知設定", bubble)
+		_, _ = bot.ReplyMessage(replyToken, flexMsg).Do()
+		return
 	}
 
 	if text == "我的收藏" {
@@ -528,7 +675,7 @@ func saveToDatabase(res Restaurant) error {
 	return err
 }
 
-func createRestaurantBubble(res Restaurant) *linebot.BubbleContainer {
+func createRestaurantBubble(userID string, res Restaurant) *linebot.BubbleContainer {
 	// 1. 動態生成 5 顆星星
 	var stars []linebot.FlexComponent
 	ratingInt := int(res.Rating + 0.5) // 四捨五入
@@ -557,6 +704,12 @@ func createRestaurantBubble(res Restaurant) *linebot.BubbleContainer {
 	actionURI := res.GoogleURL
 	if actionURI == "" {
 		actionURI = "https://maps.google.com"
+	}
+
+	baseURL := getBaseURL()
+	finalURI := actionURI
+	if baseURL != "" {
+		finalURI = fmt.Sprintf("%s/go-to-maps?userId=%s&resName=%s&target=%s", baseURL, userID, url.QueryEscape(res.Name), url.QueryEscape(actionURI))
 	}
 
 	// 3. 建立並回傳完整 Bubble
@@ -614,7 +767,7 @@ func createRestaurantBubble(res Restaurant) *linebot.BubbleContainer {
 					Type:   linebot.FlexComponentTypeButton,
 					Style:  linebot.FlexButtonStyleTypeLink,
 					Height: linebot.FlexButtonHeightTypeSm,
-					Action: linebot.NewURIAction("從 Google Maps 打開", actionURI),
+					Action: linebot.NewURIAction("從 Google Maps 打開", finalURI),
 				},
 			},
 			Flex: linebot.IntPtr(0),
@@ -623,11 +776,52 @@ func createRestaurantBubble(res Restaurant) *linebot.BubbleContainer {
 }
 
 func handlePostback(ctx context.Context, replyToken, userID, data string) {
-	if data == "action=show_collection" {
-		baseURL := os.Getenv("BASE_URL")
-		if baseURL == "" {
-			baseURL = dynamicBaseURL // 如果沒設定，就自動使用剛剛捕捉到的網址
+	if strings.HasPrefix(data, "action=toggle_notify") {
+		// Parse query string like Data
+		values, err := url.ParseQuery(data)
+		if err != nil {
+			return
 		}
+		mealType := values.Get("meal")
+		if mealType == "" {
+			return
+		}
+
+		notifyMutex.Lock()
+		defer notifyMutex.Unlock()
+
+		prefs := make(map[string]map[string]bool)
+		if fileBytes, err := os.ReadFile(notifyPrefsFile); err == nil {
+			json.Unmarshal(fileBytes, &prefs)
+		}
+
+		userPrefs := prefs[userID]
+		if userPrefs == nil {
+			userPrefs = make(map[string]bool)
+			prefs[userID] = userPrefs
+		}
+
+		// Toggle state
+		currentState := userPrefs[mealType]
+		userPrefs[mealType] = !currentState
+
+		if newBytes, err := json.MarshalIndent(prefs, "", "  "); err == nil {
+			os.WriteFile(notifyPrefsFile, newBytes, 0644)
+		}
+
+		mealNames := map[string]string{"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐"}
+		statusText := "已關閉"
+		if userPrefs[mealType] {
+			statusText = "已開啟"
+		}
+
+		replyMsg := fmt.Sprintf("✅ %s提醒%s！\n（你可以再次輸入「通知設定」來檢視目前狀態）", mealNames[mealType], statusText)
+		_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage(replyMsg)).Do()
+		return
+	}
+
+	if data == "action=show_collection" {
+		baseURL := getBaseURL()
 		if baseURL == "" {
 			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("無法取得伺服器網址，請稍後再試。")).Do()
 			return
@@ -716,4 +910,48 @@ func collectionWebHandler(w http.ResponseWriter, r *http.Request) {
     </body>
     </html>
     `, jsArray)
+}
+
+func getBaseURL() string {
+	baseURL := os.Getenv("BASE_URL")
+	if baseURL == "" {
+		baseURL = dynamicBaseURL
+	}
+	return baseURL
+}
+
+func goToMapsHandler(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("userId")
+	resName := r.URL.Query().Get("resName")
+	target := r.URL.Query().Get("target")
+
+	if userID == "" || resName == "" || target == "" {
+		http.Error(w, "Missing parameters", http.StatusBadRequest)
+		return
+	}
+
+	dineMutex.Lock()
+	defer dineMutex.Unlock()
+
+	counts := make(map[string]int)
+	if fileBytes, err := os.ReadFile(dineCountsFile); err == nil {
+		json.Unmarshal(fileBytes, &counts)
+	}
+
+	key := userID + "|" + resName
+	counts[key]++
+	currentCount := counts[key]
+
+	if newBytes, err := json.MarshalIndent(counts, "", "  "); err == nil {
+		os.WriteFile(dineCountsFile, newBytes, 0644)
+	}
+
+	if currentCount > 0 && currentCount%30 == 0 {
+		msg := fmt.Sprintf("太驚人了吧！這已經是你第 %d 次在【%s】用餐了！簡直是真愛啊！😲", currentCount, resName)
+		if _, err := bot.PushMessage(userID, linebot.NewTextMessage(msg)).Do(); err != nil {
+			log.Printf("Push message failed: %v", err)
+		}
+	}
+
+	http.Redirect(w, r, target, http.StatusFound)
 }
