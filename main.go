@@ -24,20 +24,21 @@ import (
 )
 
 type Restaurant struct {
-	Name        string
-	DistanceM   float64
-	Minutes     int
-	Lat         float64
-	Lng         float64
-	
-	GoogleURL   string
-	Rating      float64
-	PhotoURL    string
+	Name      string
+	DistanceM float64
+	Minutes   int
+	Lat       float64
+	Lng       float64
+
+	GoogleURL string
+	Rating    float64
+	PhotoURL  string
 }
 
 var bot *linebot.Client
-var sessions sync.Map   // map[userID]([]Restaurant)
-var userStates sync.Map // map[userID]string，用來記錄使用者的上下文狀態
+var sessions sync.Map     // map[userID]([]Restaurant)
+var userStates sync.Map   // map[userID]string，用來記錄使用者的上下文狀態
+var dynamicBaseURL string // 自動記錄目前的 ngrok 網址
 
 // 💡 定義 C++ 核心與 Go 共享的純文字資料庫路徑
 const dbPath = "restaurants.txt"
@@ -57,6 +58,7 @@ func main() {
 	}
 
 	http.HandleFunc("/webhook", webhookHandler)
+	http.HandleFunc("/my-collection", collectionWebHandler)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -68,6 +70,11 @@ func main() {
 
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[====== Webhook 觸發了！ =====] 收到來自：%s 的請求", r.RemoteAddr)
+
+	// 自動捕捉 ngrok 的網址，免去手動設定 BASE_URL
+	if r.Host != "" {
+		dynamicBaseURL = "https://" + r.Host
+	}
 
 	// 暫時性偵錯：記錄簽章與 request body 摘要，然後恢復 body 給 ParseRequest 使用
 	sig := r.Header.Get("X-Line-Signature")
@@ -125,6 +132,8 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 			default:
 				// ignore other message types for now
 			}
+		} else if ev.Type == linebot.EventTypePostback {
+			go handlePostback(ctx, ev.ReplyToken, ev.Source.UserID, ev.Postback.Data)
 		}
 	}
 
@@ -296,8 +305,14 @@ func handleLocation(ctx context.Context, replyToken, userID string, msg *linebot
 
 func handleText(ctx context.Context, replyToken, userID, text string) {
 	// 防呆機制：如果使用者點了其他功能，就清空可能卡住的「跋桮」狀態
-	if text == "加入餐廳" || text == "食肆雷達" || strings.Contains(text, "maps.app") {
+	if text == "加入餐廳" || text == "食肆雷達" || text == "我的收藏" || strings.Contains(text, "maps.app") {
 		userStates.Delete(userID)
+	}
+
+	if text == "我的收藏" {
+		// 支援文字觸發，以免 Rich Menu 沒有更新成功
+		handlePostback(ctx, replyToken, userID, "action=show_collection")
+		return
 	}
 
 	if text == "加入餐廳" {
@@ -487,7 +502,7 @@ func parseGoogleMaps(mapURL string) (Restaurant, error) {
 			GoogleURL: p.GoogleMapsUri,
 			Rating:    p.Rating,
 		}
-		
+
 		// 組合照片 URL (如果有照片)
 		if len(p.Photos) > 0 {
 			res.PhotoURL = fmt.Sprintf("https://places.googleapis.com/v1/%s/media?key=%s&maxHeightPx=400&maxWidthPx=400", p.Photos[0].Name, apiKey)
@@ -599,10 +614,106 @@ func createRestaurantBubble(res Restaurant) *linebot.BubbleContainer {
 					Type:   linebot.FlexComponentTypeButton,
 					Style:  linebot.FlexButtonStyleTypeLink,
 					Height: linebot.FlexButtonHeightTypeSm,
-					Action: linebot.NewURIAction("WEBSITE", actionURI),
+					Action: linebot.NewURIAction("從 Google Maps 打開", actionURI),
 				},
 			},
 			Flex: linebot.IntPtr(0),
 		},
 	}
+}
+
+func handlePostback(ctx context.Context, replyToken, userID, data string) {
+	if data == "action=show_collection" {
+		baseURL := os.Getenv("BASE_URL")
+		if baseURL == "" {
+			baseURL = dynamicBaseURL // 如果沒設定，就自動使用剛剛捕捉到的網址
+		}
+		if baseURL == "" {
+			_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage("無法取得伺服器網址，請稍後再試。")).Do()
+			return
+		}
+
+		mapURL := fmt.Sprintf("%s/my-collection?userId=%s", baseURL, userID)
+		replyMsg := fmt.Sprintf("大帝已將你的小金庫奉上！請移駕大帝秘境檢視：\n%s", mapURL)
+		_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage(replyMsg)).Do()
+	}
+}
+
+func collectionWebHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. 讀取 restaurants.txt 內的所有餐廳
+	input, err := os.ReadFile(dbPath)
+	if err != nil {
+		http.Error(w, "無法讀取小金庫", http.StatusInternalServerError)
+		return
+	}
+
+	lines := strings.Split(string(input), "\n")
+
+	// 2. 建立一串給前端 JavaScript 讀取的座標陣列字串
+	var markersData []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		// 格式：名稱|0|0|緯度|經度|Google網址|評分|圖片網址
+		if len(parts) >= 5 {
+			name := parts[0]
+			lat := parts[3]
+			lng := parts[4]
+			// Escape quotes in name
+			escapedName := strings.ReplaceAll(name, `"`, `\"`)
+
+			var googleURL string
+			if len(parts) >= 6 && parts[5] != "" {
+				googleURL = parts[5]
+			} else {
+				googleURL = fmt.Sprintf("https://www.google.com/maps/search/?api=1&query=%s,%s", lat, lng)
+			}
+
+			markersData = append(markersData, fmt.Sprintf(`{"name": "%s", "lat": %s, "lng": %s, "googleUrl": "%s"}`, escapedName, lat, lng, googleURL))
+		}
+	}
+	jsArray := "[" + strings.Join(markersData, ",") + "]"
+
+	// 3. 噴出一個純前端、使用免費 OpenStreetMap 渲染的漂亮 HTML 頁面
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>飽聲大帝的美食秘笈</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <style>
+            body, html, #map { margin: 0; padding: 0; height: 100%%; width: 100%%; font-family: sans-serif; }
+            .custom-popup { font-weight: bold; text-align: center; }
+            .nav-btn { display: block; margin-top: 5px; color: #fff; background: #db4437; padding: 5px 10px; text-decoration: none; border-radius: 4px; }
+        </style>
+    </head>
+    <body>
+        <div id="map"></div>
+        <script>
+            // 以師大本部為中心初始化地圖
+            var map = L.map('map').setView([25.0258, 121.5273], 14);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
+
+            // 💡 注入從 Go 撈出來的餐廳資料庫
+            var restaurants = %s;
+
+            // 把所有餐廳變成地圖上的大頭針
+            restaurants.forEach(function(r) {
+                var popupContent = "<div class='custom-popup'>" + r.name + 
+                                   "<a class='nav-btn' href='" + r.googleUrl + "' target='_blank'>Google 導航 🧭</a></div>";
+                
+                L.marker([r.lat, r.lng]).addTo(map).bindPopup(popupContent);
+            });
+        </script>
+    </body>
+    </html>
+    `, jsArray)
 }
